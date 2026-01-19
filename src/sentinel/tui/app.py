@@ -15,13 +15,14 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from collections import deque
 import random
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll, Grid
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll, Grid, ScrollableContainer
 from textual.widgets import (
     Header, Footer, Static, Button, DataTable, ProgressBar,
-    Tree, TabbedContent, TabPane, Label, Sparkline, Rule, Input
+    Tree, TabbedContent, TabPane, Label, Sparkline, Rule, Input, RichLog
 )
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -31,6 +32,8 @@ from rich.text import Text
 from rich.style import Style
 from rich.table import Table
 from rich.panel import Panel
+from rich.console import Console
+from io import StringIO
 
 from ..core.config import Config
 from ..core.memory import Memory, Severity, Status
@@ -186,64 +189,112 @@ class ScanProgress(Static):
 
 
 class FileHealthTree(Tree):
-    """File tree with health indicators."""
+    """File tree with lazy loading - loads children when expanded."""
+
+    SKIP_DIRS = {"node_modules", "__pycache__", "venv", ".venv", "dist", "build", ".next", "site-packages", ".git"}
+    CODE_EXTENSIONS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".c", ".cpp", ".h"}
 
     def __init__(self, project_root: Path, **kwargs):
         super().__init__(str(project_root.name), **kwargs)
         self.project_root = project_root
         self.file_issues = {}  # path -> issue count
+        # Store path data on root
+        self.root.data = {"path": project_root, "loaded": False}
 
     def set_file_issues(self, issues: dict) -> None:
         self.file_issues = issues
         self.refresh()
 
-    def build_tree(self, include_dirs: list[str]) -> None:
+    def build_tree(self, include_dirs: list[str] = None) -> None:
+        """Initialize tree with top-level directories."""
         self.clear()
+        self.root.data = {"path": self.project_root, "loaded": False}
+
+        # If include_dirs specified, add those as top level
+        if include_dirs:
+            found_any = False
+            for dir_name in include_dirs:
+                dir_path = self.project_root / dir_name
+                if dir_path.exists() and dir_path.is_dir():
+                    self._add_directory_node(self.root, dir_path)
+                    found_any = True
+            if found_any:
+                self.root.data["loaded"] = True
+                self.root.expand()
+                return
+
+        # Otherwise load root contents
+        self._load_children(self.root)
         self.root.expand()
 
-        for dir_name in include_dirs:
-            dir_path = self.project_root / dir_name
-            if dir_path.exists():
-                self._add_directory(self.root, dir_path, dir_name)
+    def _add_directory_node(self, parent, path: Path) -> None:
+        """Add a directory node (lazy - children loaded on expand)."""
+        name = path.name
+        rel_path = self._get_rel_path(path)
 
-    def _add_directory(self, parent, path: Path, name: str, depth: int = 0) -> None:
-        if depth > 3:  # Limit depth
-            return
-
-        # Get issue count for this directory
         dir_issues = sum(
             count for p, count in self.file_issues.items()
-            if p.startswith(str(path.relative_to(self.project_root)))
+            if p.startswith(rel_path + "/") or p == rel_path
         )
 
         if dir_issues > 0:
             icon = f"[{SEV_COLORS['P1']}]📁[/]"
             label = f"{icon} {name} [dim]({dir_issues})[/]"
         else:
-            label = f"[green]📁[/] {name}"
+            label = f"[cyan]📁[/] {name}"
 
-        node = parent.add(label, expand=depth < 1)
+        # Add as expandable node with path data
+        node = parent.add(label, data={"path": path, "loaded": False})
+
+    def _add_file_node(self, parent, path: Path) -> None:
+        """Add a file leaf node."""
+        rel_path = self._get_rel_path(path)
+        issues = self.file_issues.get(rel_path, 0)
+
+        if issues > 0:
+            color = SEV_COLORS["P0"] if issues > 5 else SEV_COLORS["P1"] if issues > 2 else SEV_COLORS["P3"]
+            parent.add_leaf(f"[{color}]●[/] {path.name} [dim]({issues})[/]", data={"path": path})
+        else:
+            parent.add_leaf(f"[green]●[/] {path.name}", data={"path": path})
+
+    def _get_rel_path(self, path: Path) -> str:
+        """Get relative path string."""
+        try:
+            return str(path.relative_to(self.project_root))
+        except ValueError:
+            return path.name
+
+    def _load_children(self, node) -> None:
+        """Load children of a directory node."""
+        if not node.data or node.data.get("loaded"):
+            return
+
+        path = node.data.get("path")
+        if not path or not path.is_dir():
+            return
 
         try:
-            for item in sorted(path.iterdir()):
+            items = sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            for item in items:
                 if item.name.startswith("."):
                     continue
-                if item.name in ("node_modules", "__pycache__", "venv", ".venv"):
+                if item.name in self.SKIP_DIRS:
                     continue
 
                 if item.is_dir():
-                    self._add_directory(node, item, item.name, depth + 1)
-                elif item.suffix in (".py", ".js", ".ts", ".tsx"):
-                    rel_path = str(item.relative_to(self.project_root))
-                    issues = self.file_issues.get(rel_path, 0)
+                    self._add_directory_node(node, item)
+                elif item.suffix in self.CODE_EXTENSIONS:
+                    self._add_file_node(node, item)
 
-                    if issues > 0:
-                        color = SEV_COLORS["P1"] if issues > 3 else SEV_COLORS["P3"]
-                        node.add_leaf(f"[{color}]●[/] {item.name} [dim]({issues})[/]")
-                    else:
-                        node.add_leaf(f"[green]●[/] {item.name}")
+            node.data["loaded"] = True
         except PermissionError:
             pass
+
+    def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
+        """Lazy load children when node is expanded."""
+        node = event.node
+        if node.data and not node.data.get("loaded"):
+            self._load_children(node)
 
 
 class FindingsTable(DataTable):
@@ -310,54 +361,111 @@ class FindingDetail(Static):
         return Text.from_markup(content)
 
 
-class ChatMessage(Static):
-    """A single chat message."""
+class ChatLog(RichLog):
+    """Chat log with better text handling and markdown support."""
 
-    def __init__(self, content: str, is_user: bool = False, **kwargs):
-        super().__init__(**kwargs)
-        self.content = content
-        self.is_user = is_user
+    def __init__(self, **kwargs):
+        super().__init__(highlight=True, markup=True, wrap=True, **kwargs)
+        self.last_message = ""
 
-    def on_mount(self) -> None:
-        if self.is_user:
-            self.styles.background = "#1a3a5c"
-            self.styles.border = ("round", "#3a7ca5")
-        else:
-            self.styles.background = "#1a1a1a"
-            self.styles.border = ("round", "#333")
-        self.styles.padding = (0, 1)
-        self.styles.margin = (0, 0, 1, 0)
+    def _md_to_rich(self, text: str) -> str:
+        """Convert markdown to Rich markup."""
+        import re
 
-    def render(self) -> Text:
-        prefix = "[cyan]You:[/] " if self.is_user else "[green]Sentinel:[/] "
-        return Text.from_markup(f"{prefix}{self.content}")
+        # Process line by line for headers and lists
+        lines = text.split('\n')
+        result = []
+        in_code_block = False
 
+        for line in lines:
+            # Code blocks
+            if line.strip().startswith('```'):
+                in_code_block = not in_code_block
+                if in_code_block:
+                    result.append('[on #1a1a2e]')
+                else:
+                    result.append('[/on #1a1a2e]')
+                continue
 
-class ChatPanel(VerticalScroll):
-    """Scrollable chat panel."""
+            if in_code_block:
+                result.append(f'[cyan]{line}[/cyan]')
+                continue
+
+            # Headers
+            if line.startswith('### '):
+                result.append(f'[bold cyan]{line[4:]}[/bold cyan]')
+                continue
+            elif line.startswith('## '):
+                result.append(f'[bold yellow]{line[3:]}[/bold yellow]')
+                continue
+            elif line.startswith('# '):
+                result.append(f'[bold magenta]{line[2:]}[/bold magenta]')
+                continue
+
+            # Bullet points
+            if line.strip().startswith('- '):
+                line = '  • ' + line.strip()[2:]
+            elif line.strip().startswith('* '):
+                line = '  • ' + line.strip()[2:]
+
+            # Bold **text**
+            line = re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', line)
+
+            # Italic *text* (but not inside bold)
+            line = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'[italic]\1[/italic]', line)
+
+            # Inline code `text`
+            line = re.sub(r'`([^`]+)`', r'[cyan on #1a1a2e]\1[/cyan on #1a1a2e]', line)
+
+            result.append(line)
+
+        return '\n'.join(result)
 
     def add_message(self, content: str, is_user: bool = False) -> None:
-        msg = ChatMessage(content, is_user=is_user)
-        self.mount(msg)
-        self.scroll_end(animate=False)
-
-    def add_thinking(self) -> Static:
-        indicator = Static("[cyan]⠋[/] Thinking...", id="chat-thinking")
-        indicator.styles.color = "cyan"
-        self.mount(indicator)
-        self.scroll_end(animate=False)
-        self._thinking_frame = 0
-        return indicator
-
-    def remove_thinking(self) -> None:
-        try:
-            self.query_one("#chat-thinking").remove()
-        except Exception:
-            pass
+        prefix = "[cyan bold]You:[/cyan bold] " if is_user else "[green bold]Sentinel:[/green bold] "
+        formatted = self._md_to_rich(content) if not is_user else content
+        self.write(Text.from_markup(f"{prefix}{formatted}"))
+        self.write("")  # Add spacing
+        self.last_message = content
 
     def clear_chat(self) -> None:
-        for child in list(self.children):
-            child.remove()
+        self.clear()
+
+
+class ThinkingIndicator(Static):
+    """Animated thinking indicator with queue status."""
+
+    SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    is_thinking = reactive(False)
+    queue_count = reactive(0)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.frame_index = 0
+
+    def on_mount(self) -> None:
+        self.set_interval(0.1, self._animate)
+
+    def _animate(self) -> None:
+        if self.is_thinking:
+            self.frame_index = (self.frame_index + 1) % len(self.SPINNER_FRAMES)
+            self.refresh()
+
+    def render(self) -> Text:
+        if not self.is_thinking and self.queue_count == 0:
+            return Text("")
+
+        parts = []
+
+        if self.is_thinking:
+            spinner = self.SPINNER_FRAMES[self.frame_index]
+            parts.append(f"[cyan]{spinner} Processing...[/cyan]")
+
+        if self.queue_count > 0:
+            parts.append(f"[dim]({self.queue_count} queued)[/dim]")
+
+        return Text.from_markup(" ".join(parts))
 
 
 class LogPanel(VerticalScroll):
@@ -465,7 +573,7 @@ class SentinelApp(App):
         border-bottom: solid #333;
     }
 
-    ChatPanel {
+    ChatLog {
         height: 1fr;
         padding: 1;
     }
@@ -500,9 +608,12 @@ class SentinelApp(App):
         margin-bottom: 0;
     }
 
-    ChatMessage {
-        width: 100%;
+    #thinking-indicator {
+        height: auto;
+        padding: 0 1;
+        background: #111;
     }
+
     """
 
     BINDINGS = [
@@ -524,6 +635,8 @@ class SentinelApp(App):
         self.memory = None
         self.scanner = None
         self.scan_timer: Optional[Timer] = None
+        self.message_queue: deque = deque()
+        self.is_processing = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -557,9 +670,10 @@ class SentinelApp(App):
                 with Container(id="right-panel"):
                     yield Static("SENTINEL AI", classes="panel-title")
                     yield FindingDetail(id="finding-detail")
-                    yield ChatPanel(id="chat-panel")
+                    yield ChatLog(id="chat-panel")
 
-            # Chat input at bottom
+            # Thinking indicator and chat input at bottom
+            yield ThinkingIndicator(id="thinking-indicator")
             with Container(id="chat-input-container"):
                 yield Static("[dim]Shift+drag to select text[/]", id="copy-hint")
                 yield Input(
@@ -573,7 +687,10 @@ class SentinelApp(App):
         self.title = "Code Sentinel"
         self.sub_title = str(self.project_root.name)
 
-        # Initialize
+        # Run startup checks FIRST (before anything else)
+        self.run_startup_checks()
+
+        # Initialize sentinel components
         try:
             self.config = Config.load(self.project_root)
             self.config.ensure_dirs()
@@ -591,18 +708,21 @@ class SentinelApp(App):
             # Load initial data
             self.refresh_data()
 
-            # Run startup checks
-            self.run_startup_checks()
-
-            # Welcome message in chat
-            chat = self.query_one("#chat-panel", ChatPanel)
-            chat.add_message(
-                "Hey! I'm Sentinel. Ask me anything about your code, "
-                "or type [cyan]:scan[/] to find issues. [dim]:help for commands[/]"
-            )
-
         except Exception as e:
             self.log_message(f"Init error: {e}", "error")
+            # Still build file tree even without config
+            try:
+                tree = self.query_one("#file-tree", FileHealthTree)
+                tree.build_tree()
+            except Exception:
+                pass
+
+        # Welcome message in chat
+        chat = self.query_one("#chat-panel", ChatLog)
+        chat.add_message(
+            "Hey! I'm Sentinel. Ask me anything about your code, "
+            "or type [cyan]:scan[/] to find issues. [dim]:help for commands[/]"
+        )
 
         # Animate scan progress
         self.set_interval(0.1, self.animate_scan)
@@ -610,14 +730,57 @@ class SentinelApp(App):
         # Focus chat input
         self.query_one("#chat-input").focus()
 
+    def _find_git_root(self) -> Optional[Path]:
+        """Find .git by searching: current dir, parent dirs, then child dirs."""
+        root = self.project_root.resolve()
+
+        # 1. Check current directory
+        if (root / ".git").exists():
+            return root
+
+        # 2. Search UP parent directories
+        current = root.parent
+        while current != current.parent:
+            if (current / ".git").exists():
+                return current
+            current = current.parent
+
+        # 3. Search DOWN immediate child directories (1 level)
+        try:
+            for child in root.iterdir():
+                if child.is_dir() and not child.name.startswith("."):
+                    if (child / ".git").exists():
+                        return child
+        except PermissionError:
+            pass
+
+        # 4. Search DOWN 2 levels deep
+        try:
+            for child in root.iterdir():
+                if child.is_dir() and not child.name.startswith("."):
+                    for grandchild in child.iterdir():
+                        if grandchild.is_dir() and not grandchild.name.startswith("."):
+                            if (grandchild / ".git").exists():
+                                return grandchild
+        except PermissionError:
+            pass
+
+        return None
+
     def run_startup_checks(self) -> None:
         """Run startup checks and display warnings."""
         warnings = []
+        successes = []
 
-        # Check if git is initialized
-        git_dir = self.project_root / ".git"
-        if not git_dir.exists():
+        # Check if git is initialized (search up directory tree)
+        git_root = self._find_git_root()
+        if not git_root:
             warnings.append(("⚠ Git not initialized", "Run 'git init' to enable git integration (blame, history)", "warn"))
+        elif git_root != self.project_root:
+            # Git found but in parent directory
+            successes.append(f"✓ Git found (root: {git_root.name})")
+        else:
+            successes.append("✓ Git initialized")
 
         # Check if gh CLI is installed
         if not shutil.which("gh"):
@@ -633,25 +796,33 @@ class SentinelApp(App):
                 )
                 if result.returncode != 0:
                     warnings.append(("⚠ GitHub CLI not authenticated", "Run 'gh auth login' to enable auto-issue creation", "warn"))
+                else:
+                    successes.append("✓ GitHub CLI ready")
             except Exception:
                 pass  # Skip if check fails - not critical
 
         # Check if claude CLI is available (for AI features)
         if not shutil.which("claude"):
             warnings.append(("ℹ Claude CLI not found", "Install Claude Code CLI for AI-powered analysis", "info"))
+        else:
+            successes.append("✓ Claude CLI ready")
 
         # Check if .sentinel is initialized
         sentinel_dir = self.project_root / ".sentinel"
         if not sentinel_dir.exists():
             warnings.append(("⚠ Sentinel not initialized", "Press 's' to run first scan and initialize", "warn"))
+        else:
+            successes.append("✓ Sentinel initialized")
 
-        # Display warnings
+        # Display successes as notification
+        if successes:
+            self.notify(" | ".join(successes), severity="information", timeout=4)
+            self.sub_title = " | ".join(successes)
+
+        # Display warnings as notifications
         if warnings:
             for title, desc, level in warnings:
                 self.notify(f"{title}: {desc}", severity="warning" if level == "warn" else "information", timeout=5)
-                self.log_message(f"{title} - {desc}", level)
-        else:
-            self.log_message("All systems ready", "success")
 
     def refresh_data(self) -> None:
         """Refresh all data displays."""
@@ -775,7 +946,7 @@ class SentinelApp(App):
 
     def action_help(self) -> None:
         """Show help."""
-        chat = self.query_one("#chat-panel", ChatPanel)
+        chat = self.query_one("#chat-panel", ChatLog)
         help_text = """[bold]Commands:[/]
 :scan - Run full scan
 :quick - Quick incremental scan
@@ -794,12 +965,9 @@ Hold [bold]Shift[/] + drag mouse to select & copy
     def action_copy_last(self) -> None:
         """Copy last chat message to clipboard."""
         try:
-            chat = self.query_one("#chat-panel", ChatPanel)
-            messages = list(chat.query(ChatMessage))
-            if messages:
-                last_msg = messages[-1]
-                # Get raw content without markup
-                content = last_msg.content
+            chat = self.query_one("#chat-panel", ChatLog)
+            if chat.last_message:
+                content = chat.last_message
 
                 # Try to copy to clipboard
                 try:
@@ -811,6 +979,8 @@ Hold [bold]Shift[/] + drag mouse to select & copy
                     tmp_file = Path("/tmp/sentinel_copy.txt")
                     tmp_file.write_text(content)
                     self.notify(f"Saved to {tmp_file}", severity="information", timeout=2)
+            else:
+                self.notify("No messages to copy", severity="information", timeout=2)
         except Exception as e:
             self.notify(f"Copy failed: {e}", severity="error")
 
@@ -819,26 +989,53 @@ Hold [bold]Shift[/] + drag mouse to select & copy
         self.sub_title = message
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle chat input."""
+        """Handle chat input with message queuing."""
         user_input = event.value.strip()
         if not user_input:
             return
 
         event.input.value = ""
-        chat = self.query_one("#chat-panel", ChatPanel)
+        chat = self.query_one("#chat-panel", ChatLog)
+        thinking = self.query_one("#thinking-indicator", ThinkingIndicator)
 
-        # Handle commands
+        # Handle commands immediately
         if user_input.startswith(":"):
             await self.handle_chat_command(user_input)
             return
 
-        # Regular message - send to Claude
+        # Show user message
         chat.add_message(user_input, is_user=True)
-        await self.ask_claude(user_input)
+
+        # Queue the message
+        self.message_queue.append(user_input)
+        thinking.queue_count = len(self.message_queue)
+
+        # Start processing if not already
+        if not self.is_processing:
+            asyncio.create_task(self.process_message_queue())
+
+    async def process_message_queue(self) -> None:
+        """Process queued messages sequentially."""
+        if self.is_processing:
+            return
+
+        self.is_processing = True
+        thinking = self.query_one("#thinking-indicator", ThinkingIndicator)
+
+        while self.message_queue:
+            question = self.message_queue.popleft()
+            thinking.queue_count = len(self.message_queue)
+            thinking.is_thinking = True
+
+            await self.ask_claude(question)
+
+            thinking.is_thinking = False
+
+        self.is_processing = False
 
     async def handle_chat_command(self, command: str) -> None:
         """Handle chat commands."""
-        chat = self.query_one("#chat-panel", ChatPanel)
+        chat = self.query_one("#chat-panel", ChatLog)
         cmd = command.lower()
 
         if cmd == ":clear":
@@ -871,7 +1068,7 @@ Hold [bold]Shift[/] + drag mouse to select & copy
             )
             self.refresh_data()
 
-            chat = self.query_one("#chat-panel", ChatPanel)
+            chat = self.query_one("#chat-panel", ChatLog)
             if findings:
                 chat.add_message(f"Found {len(findings)} new issues.")
             else:
@@ -884,8 +1081,7 @@ Hold [bold]Shift[/] + drag mouse to select & copy
 
     async def ask_claude(self, question: str) -> None:
         """Ask Claude Code about the codebase."""
-        chat = self.query_one("#chat-panel", ChatPanel)
-        chat.add_thinking()
+        chat = self.query_one("#chat-panel", ChatLog)
 
         try:
             # Build context-aware prompt
@@ -911,8 +1107,6 @@ Be helpful and concise. If they ask to fix something, provide specific code chan
                 )
             )
 
-            chat.remove_thinking()
-
             if result.returncode == 0 and result.stdout.strip():
                 # Truncate very long responses for TUI
                 response = result.stdout.strip()
@@ -924,13 +1118,10 @@ Be helpful and concise. If they ask to fix something, provide specific code chan
                 chat.add_message(f"[yellow]Claude returned no output. Error: {error[:200]}[/]")
 
         except subprocess.TimeoutExpired:
-            chat.remove_thinking()
             chat.add_message("[yellow]Request timed out. Try a simpler question.[/]")
         except FileNotFoundError:
-            chat.remove_thinking()
             chat.add_message("[red]Claude CLI not found.[/] Install with: npm install -g @anthropic-ai/claude-code")
         except Exception as e:
-            chat.remove_thinking()
             chat.add_message(f"[red]Error: {str(e)[:100]}[/]")
 
 
