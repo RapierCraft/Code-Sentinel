@@ -437,22 +437,33 @@ class ThinkingIndicator(Static):
 
     SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    is_thinking = reactive(False)
-    queue_count = reactive(0)
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.frame_index = 0
+        self.is_thinking = False
+        self.queue_count = 0
 
     def on_mount(self) -> None:
-        self.set_interval(0.1, self._animate)
+        """Start animation timer on mount."""
+        self.set_interval(0.1, self._tick)
 
-    def _animate(self) -> None:
+    def _tick(self) -> None:
+        """Animation tick - always runs."""
         if self.is_thinking:
             self.frame_index = (self.frame_index + 1) % len(self.SPINNER_FRAMES)
-            self.refresh()
+        self.update(self._render_content())
 
-    def render(self) -> Text:
+    def set_thinking(self, thinking: bool) -> None:
+        """Set thinking state."""
+        self.is_thinking = thinking
+        self.update(self._render_content())
+
+    def set_queue(self, count: int) -> None:
+        """Set queue count."""
+        self.queue_count = count
+        self.update(self._render_content())
+
+    def _render_content(self) -> Text:
         if not self.is_thinking and self.queue_count == 0:
             return Text.from_markup("[dim]Ready[/dim]")
 
@@ -1008,7 +1019,7 @@ Hold [bold]Shift[/] + drag mouse to select & copy
 
         # Queue the message
         self.message_queue.append(user_input)
-        thinking.queue_count = len(self.message_queue)
+        thinking.set_queue(len(self.message_queue))
 
         # Start processing if not already
         if not self.is_processing:
@@ -1024,12 +1035,12 @@ Hold [bold]Shift[/] + drag mouse to select & copy
 
         while self.message_queue:
             question = self.message_queue.popleft()
-            thinking.queue_count = len(self.message_queue)
-            thinking.is_thinking = True
+            thinking.set_queue(len(self.message_queue))
+            thinking.set_thinking(True)
 
             await self.ask_claude(question)
 
-            thinking.is_thinking = False
+            thinking.set_thinking(False)
 
         self.is_processing = False
 
