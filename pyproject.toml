@@ -1,0 +1,68 @@
+[tool.poetry]
+name = "code-sentinel"
+version = "0.1.0"
+description = "AI-powered code auditor that lives in your codebase. Local-first, privacy-focused, with persistent memory."
+authors = ["RapierCraft <hello@rapiercraft.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/RapierCraft/code-sentinel"
+repository = "https://github.com/RapierCraft/code-sentinel"
+keywords = ["code-review", "ai", "security", "static-analysis", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+packages = [{include = "sentinel", from = "src"}]
+
+[tool.poetry.scripts]
+sentinel = "sentinel.cli:main"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+click = "^8.1.0"
+rich = "^13.0.0"
+textual = "^0.89.0"
+anthropic = "^0.40.0"
+gitpython = "^3.1.0"
+tree-sitter = "^0.23.0"
+tree-sitter-python = "^0.23.0"
+tree-sitter-javascript = "^0.23.0"
+tree-sitter-typescript = "^0.23.0"
+pyyaml = "^6.0"
+watchdog = "^4.0.0"
+networkx = "^3.0"
+bandit = "^1.7.0"
+semgrep = {version = "^1.90.0", optional = true}
+
+[tool.poetry.extras]
+semgrep = ["semgrep"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.24.0"
+black = "^24.0.0"
+isort = "^5.13.0"
+mypy = "^1.8.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
