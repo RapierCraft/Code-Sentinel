@@ -493,6 +493,13 @@ class SentinelApp(App):
         width: 100%;
     }
 
+    #copy-hint {
+        text-align: right;
+        color: #555;
+        height: 1;
+        margin-bottom: 0;
+    }
+
     ChatMessage {
         width: 100%;
     }
@@ -554,6 +561,7 @@ class SentinelApp(App):
 
             # Chat input at bottom
             with Container(id="chat-input-container"):
+                yield Static("[dim]Shift+drag to select text[/]", id="copy-hint")
                 yield Input(
                     placeholder="Ask Sentinel anything... (or :scan, :help, :clear)",
                     id="chat-input"
