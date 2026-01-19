@@ -506,6 +506,7 @@ class SentinelApp(App):
         Binding("d", "show_detail", "Detail"),
         Binding("g", "run_graph", "Graph"),
         Binding("?", "help", "Help"),
+        Binding("c", "copy_last", "Copy"),
         Binding("escape", "quit", "Quit"),
     ]
 
@@ -774,10 +775,36 @@ class SentinelApp(App):
 :help - Show this help
 
 [bold]Keys:[/]
-s - Scan  r - Refresh  f - Focus findings  q - Quit
+s - Scan  r - Refresh  c - Copy  f - Findings  q - Quit
+
+[bold]Copy text:[/]
+Hold [bold]Shift[/] + drag mouse to select & copy
 
 [dim]Or just ask me anything about your code![/]"""
         chat.add_message(help_text)
+
+    def action_copy_last(self) -> None:
+        """Copy last chat message to clipboard."""
+        try:
+            chat = self.query_one("#chat-panel", ChatPanel)
+            messages = list(chat.query(ChatMessage))
+            if messages:
+                last_msg = messages[-1]
+                # Get raw content without markup
+                content = last_msg.content
+
+                # Try to copy to clipboard
+                try:
+                    import pyperclip
+                    pyperclip.copy(content)
+                    self.notify("Copied to clipboard!", severity="information", timeout=2)
+                except ImportError:
+                    # Fallback: write to temp file
+                    tmp_file = Path("/tmp/sentinel_copy.txt")
+                    tmp_file.write_text(content)
+                    self.notify(f"Saved to {tmp_file}", severity="information", timeout=2)
+        except Exception as e:
+            self.notify(f"Copy failed: {e}", severity="error")
 
     def log_message(self, message: str, level: str = "info") -> None:
         """Add message to log."""
