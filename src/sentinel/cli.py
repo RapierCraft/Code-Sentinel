@@ -46,13 +46,20 @@ def get_sentinel(ctx: click.Context) -> tuple[Config, Memory, Scanner]:
     return config, memory, scanner
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.option("--project", "-p", default=".", help="Project root directory")
 @click.pass_context
 def main(ctx: click.Context, project: str) -> None:
     """Code Sentinel - AI-powered code auditor that lives in your codebase."""
     ctx.ensure_object(dict)
     ctx.obj["project_root"] = project
+
+    # If no command specified, launch TUI
+    if ctx.invoked_subcommand is None:
+        from .tui import SentinelApp
+        project_root = Path(project).resolve()
+        app = SentinelApp(project_root=project_root)
+        app.run()
 
 
 @main.command()
