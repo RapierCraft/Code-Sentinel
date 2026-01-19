@@ -454,16 +454,16 @@ class ThinkingIndicator(Static):
 
     def render(self) -> Text:
         if not self.is_thinking and self.queue_count == 0:
-            return Text("")
+            return Text.from_markup("[dim]Ready[/dim]")
 
         parts = []
 
         if self.is_thinking:
             spinner = self.SPINNER_FRAMES[self.frame_index]
-            parts.append(f"[cyan]{spinner} Processing...[/cyan]")
+            parts.append(f"[cyan bold]{spinner} Processing...[/cyan bold]")
 
         if self.queue_count > 0:
-            parts.append(f"[dim]({self.queue_count} queued)[/dim]")
+            parts.append(f"[yellow]({self.queue_count} queued)[/yellow]")
 
         return Text.from_markup(" ".join(parts))
 
@@ -609,9 +609,9 @@ class SentinelApp(App):
     }
 
     #thinking-indicator {
-        height: auto;
+        height: 1;
         padding: 0 1;
-        background: #111;
+        background: #0a0a0a;
     }
 
     """
@@ -671,9 +671,9 @@ class SentinelApp(App):
                     yield Static("SENTINEL AI", classes="panel-title")
                     yield FindingDetail(id="finding-detail")
                     yield ChatLog(id="chat-panel")
+                    yield ThinkingIndicator(id="thinking-indicator")
 
-            # Thinking indicator and chat input at bottom
-            yield ThinkingIndicator(id="thinking-indicator")
+            # Chat input at bottom
             with Container(id="chat-input-container"):
                 yield Static("[dim]Shift+drag to select text[/]", id="copy-hint")
                 yield Input(
@@ -1095,11 +1095,11 @@ User question: {question}
 
 Be helpful and concise. If they ask to fix something, provide specific code changes. If they ask about the codebase, analyze relevant files."""
 
-            # Call Claude Code CLI
+            # Call Claude Code CLI (-p for print mode, prompt as positional arg)
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    ["claude", "-p", prompt],
+                    ["claude", "--print", "--dangerously-skip-permissions", prompt],
                     capture_output=True,
                     text=True,
                     timeout=120,
