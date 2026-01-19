@@ -54,26 +54,16 @@ CODE_SMELL_PATTERNS = [
     (r'#\s*(TODO|FIXME|HACK|XXX|BUG)[\s:]+(.{10,})',
      "TODO/FIXME comment", Severity.P3, Category.TECH_DEBT),
 
-    # Magic numbers
-    (r'(?<![0-9a-zA-Z_])(?:if|while|for).*[<>=!]+\s*(?:[2-9]\d{2,}|\d{4,})(?![0-9])',
-     "Magic number in condition", Severity.P3, Category.STYLE),
-
     # Empty except
     (r'except\s*:\s*(?:pass|\.\.\.)\s*$',
      "Empty except clause - silently swallowing errors", Severity.P2, Category.BUG),
 
-    # Broad exception
-    (r'except\s+Exception\s*(?:as\s+\w+)?:',
-     "Catching broad Exception", Severity.P3, Category.STYLE),
+    # Broad exception (only flag bare Exception, not Exception as e which is often intentional)
+    (r'except\s+Exception\s*:',
+     "Bare except Exception - consider specific exceptions", Severity.P3, Category.STYLE),
 
     # Console/debug statements
     (r'console\.log\s*\(', "console.log left in code", Severity.P3, Category.TECH_DEBT),
-    (r'print\s*\([^)]*\)\s*#?\s*(?:debug|test)?',
-     "print statement (possible debug code)", Severity.P3, Category.TECH_DEBT),
-
-    # Long functions (heuristic)
-    (r'^(?:def|function|async function)\s+\w+',
-     "Function definition (check length)", Severity.P3, Category.STYLE),
 ]
 
 # Dead code patterns
@@ -254,29 +244,42 @@ class Scanner:
 
     def _get_scannable_files(self, directory: Path) -> Generator[Path, None, None]:
         """Get all files that should be scanned."""
-        for root, dirs, files in os.walk(directory):
-            # Filter out excluded directories
-            dirs[:] = [
-                d for d in dirs
-                if not any(
-                    fnmatch.fnmatch(d, pat.split("/")[0])
-                    for pat in self.config.scan.exclude_patterns
-                )
-            ]
+        # Determine which directories to scan
+        scan_roots = []
+        if self.config.scan.include_dirs:
+            for include_dir in self.config.scan.include_dirs:
+                include_path = directory / include_dir
+                if include_path.exists():
+                    scan_roots.append(include_path)
 
-            for file in files:
-                file_path = Path(root) / file
+        # If no include_dirs match, fall back to scanning entire directory
+        if not scan_roots:
+            scan_roots = [directory]
 
-                # Check extension
-                if file_path.suffix not in self.config.scan.extensions:
-                    continue
+        for scan_root in scan_roots:
+            for root, dirs, files in os.walk(scan_root):
+                # Filter out excluded directories
+                dirs[:] = [
+                    d for d in dirs
+                    if not any(
+                        fnmatch.fnmatch(d, pat.split("/")[0])
+                        for pat in self.config.scan.exclude_patterns
+                    )
+                ]
 
-                # Check exclude patterns
-                rel_path = str(file_path.relative_to(directory))
-                if any(fnmatch.fnmatch(rel_path, pat) for pat in self.config.scan.exclude_patterns):
-                    continue
+                for file in files:
+                    file_path = Path(root) / file
 
-                yield file_path
+                    # Check extension
+                    if file_path.suffix not in self.config.scan.extensions:
+                        continue
+
+                    # Check exclude patterns
+                    rel_path = str(file_path.relative_to(directory))
+                    if any(fnmatch.fnmatch(rel_path, pat) for pat in self.config.scan.exclude_patterns):
+                        continue
+
+                    yield file_path
 
     def _file_changed(self, file_path: Path) -> bool:
         """Check if file has changed since last scan."""

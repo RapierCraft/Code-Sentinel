@@ -1,0 +1,38 @@
+ai:
+  model: claude-sonnet-4-20250514
+  use_claude_code: true
+github_auto_issues: true
+github_labels:
+- sentinel
+- auto-detected
+scan:
+  auto_issue_threshold: P1
+  exclude_patterns:
+  - '**/node_modules/**'
+  - '**/__pycache__/**'
+  - '**/.git/**'
+  - '**/dist/**'
+  - '**/build/**'
+  - '**/.next/**'
+  - '**/venv/**'
+  - '**/.venv/**'
+  - '**/test_*.py'
+  - '**/*_test.py'
+  - '**/tests/**'
+  - '**/site-packages/**'
+  - '**/sentinel/**'
+  extensions:
+  - .py
+  - .js
+  - .ts
+  - .tsx
+  - .jsx
+  - .go
+  - .rs
+  - .java
+  - .rb
+  include_dirs:
+  - src
+  - app
+  - lib
+  security_enabled: true
