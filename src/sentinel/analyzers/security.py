@@ -117,6 +117,11 @@ class SecurityAnalyzer:
         for pattern, title, description, severity in self.all_patterns:
             for match in re.finditer(pattern, content, re.MULTILINE):
                 line_num = content[:match.start()].count("\n") + 1
+                line_content = lines[line_num - 1] if line_num <= len(lines) else ""
+
+                # Skip false positives: pattern definitions in strings/regexes
+                if self._is_false_positive(line_content, match.group()):
+                    continue
 
                 # Get context
                 start = max(0, line_num - 2)
@@ -139,6 +144,25 @@ class SecurityAnalyzer:
                 ))
 
         return findings
+
+    def _is_false_positive(self, line: str, match_text: str) -> bool:
+        """Check if a match is a false positive (inside pattern definition)."""
+        stripped = line.strip()
+        # Skip regex pattern definitions
+        if stripped.startswith("(r'") or stripped.startswith('(r"'):
+            return True
+        if stripped.startswith("r'") or stripped.startswith('r"'):
+            return True
+        # Skip if inside a raw string pattern
+        if re.search(r"r['\"].*" + re.escape(match_text[:15] if len(match_text) > 15 else match_text), line):
+            return True
+        # Skip pattern variable assignments
+        if re.match(r"^\s*\w*[Pp]attern", stripped):
+            return True
+        # Skip lines that are clearly pattern lists
+        if "_PATTERNS" in line or "PATTERNS =" in line:
+            return True
+        return False
 
     def scan_dependencies(self, project_root: Path) -> list[Finding]:
         """Scan for vulnerable dependencies."""

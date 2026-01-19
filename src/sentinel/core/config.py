@@ -24,6 +24,11 @@ class ScanConfig:
         "**/.next/**",
         "**/venv/**",
         "**/.venv/**",
+        "**/test_*.py",
+        "**/*_test.py",
+        "**/tests/**",
+        "**/site-packages/**",
+        "**/sentinel/**",  # Exclude sentinel's own source to avoid false positives
     ])
 
     # File extensions to analyze

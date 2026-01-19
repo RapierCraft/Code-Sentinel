@@ -194,6 +194,14 @@ class Scanner:
             findings = []
             rel_path = str(file_path.relative_to(self.config.project_root))
 
+            # Skip if file matches exclude patterns (self-exclusion)
+            if any(fnmatch.fnmatch(rel_path, pat) for pat in self.config.scan.exclude_patterns):
+                return FileAnalysis(
+                    file_path=rel_path,
+                    content_hash=content_hash,
+                    findings=[]
+                )
+
             # Run pattern-based analysis
             findings.extend(self._scan_patterns(rel_path, content))
 
@@ -293,6 +301,11 @@ class Scanner:
             for match in re.finditer(pattern, content, re.MULTILINE):
                 # Find line number
                 line_num = content[:match.start()].count("\n") + 1
+                line_content = lines[line_num - 1] if line_num <= len(lines) else ""
+
+                # Skip false positives: pattern definitions in strings
+                if self._is_pattern_definition(line_content, match.group()):
+                    continue
 
                 # Get code snippet
                 start_line = max(0, line_num - 2)
@@ -314,6 +327,25 @@ class Scanner:
                 ))
 
         return findings
+
+    def _is_pattern_definition(self, line: str, match_text: str) -> bool:
+        """Check if a match is inside a pattern/regex definition (false positive)."""
+        # Skip if line is a regex pattern definition (starts with pattern syntax)
+        stripped = line.strip()
+        if stripped.startswith("(r'") or stripped.startswith('(r"'):
+            return True
+        if stripped.startswith("r'") or stripped.startswith('r"'):
+            return True
+        # Skip if match is inside a raw string (common for patterns)
+        if re.search(r"r['\"].*" + re.escape(match_text[:20]), line):
+            return True
+        # Skip comment lines that are documenting patterns
+        if stripped.startswith("#") and ("pattern" in stripped.lower() or "regex" in stripped.lower()):
+            return True
+        # Skip if line contains "pattern" variable assignment
+        if re.match(r"^\s*\w*[Pp]attern", stripped):
+            return True
+        return False
 
     def _scan_security(
         self,
