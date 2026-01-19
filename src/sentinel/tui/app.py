@@ -21,7 +21,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll, Grid
 from textual.widgets import (
     Header, Footer, Static, Button, DataTable, ProgressBar,
-    Tree, TabbedContent, TabPane, Label, Sparkline, Rule
+    Tree, TabbedContent, TabPane, Label, Sparkline, Rule, Input
 )
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -30,6 +30,7 @@ from textual import events
 from rich.text import Text
 from rich.style import Style
 from rich.table import Table
+from rich.panel import Panel
 
 from ..core.config import Config
 from ..core.memory import Memory, Severity, Status
@@ -309,6 +310,56 @@ class FindingDetail(Static):
         return Text.from_markup(content)
 
 
+class ChatMessage(Static):
+    """A single chat message."""
+
+    def __init__(self, content: str, is_user: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.content = content
+        self.is_user = is_user
+
+    def on_mount(self) -> None:
+        if self.is_user:
+            self.styles.background = "#1a3a5c"
+            self.styles.border = ("round", "#3a7ca5")
+        else:
+            self.styles.background = "#1a1a1a"
+            self.styles.border = ("round", "#333")
+        self.styles.padding = (0, 1)
+        self.styles.margin = (0, 0, 1, 0)
+
+    def render(self) -> Text:
+        prefix = "[cyan]You:[/] " if self.is_user else "[green]Sentinel:[/] "
+        return Text.from_markup(f"{prefix}{self.content}")
+
+
+class ChatPanel(VerticalScroll):
+    """Scrollable chat panel."""
+
+    def add_message(self, content: str, is_user: bool = False) -> None:
+        msg = ChatMessage(content, is_user=is_user)
+        self.mount(msg)
+        self.scroll_end(animate=False)
+
+    def add_thinking(self) -> Static:
+        indicator = Static("[cyan]⠋[/] Thinking...", id="chat-thinking")
+        indicator.styles.color = "cyan"
+        self.mount(indicator)
+        self.scroll_end(animate=False)
+        self._thinking_frame = 0
+        return indicator
+
+    def remove_thinking(self) -> None:
+        try:
+            self.query_one("#chat-thinking").remove()
+        except Exception:
+            pass
+
+    def clear_chat(self) -> None:
+        for child in list(self.children):
+            child.remove()
+
+
 class LogPanel(VerticalScroll):
     """Activity log panel."""
 
@@ -331,19 +382,15 @@ class SentinelApp(App):
         background: #0a0a0a;
     }
 
-    #main-grid {
-        grid-size: 3 2;
-        grid-columns: 1fr 2fr 1fr;
-        grid-rows: auto 1fr;
+    #main-container {
         height: 100%;
         padding: 1;
-        grid-gutter: 1;
     }
 
-    #header-row {
-        column-span: 3;
+    #top-row {
         height: auto;
         layout: horizontal;
+        margin-bottom: 1;
     }
 
     #health-section {
@@ -359,6 +406,7 @@ class SentinelApp(App):
         border: round #333;
         padding: 1;
         layout: horizontal;
+        margin: 0 1;
     }
 
     #scan-section {
@@ -374,17 +422,26 @@ class SentinelApp(App):
         padding: 0 1;
     }
 
+    #panels-row {
+        height: 1fr;
+        layout: horizontal;
+    }
+
     #left-panel {
+        width: 1fr;
         border: round #333;
         height: 100%;
     }
 
     #center-panel {
+        width: 1fr;
         border: round #333;
         height: 100%;
+        margin: 0 1;
     }
 
     #right-panel {
+        width: 2fr;
         border: round #333;
         height: 100%;
     }
@@ -402,34 +459,42 @@ class SentinelApp(App):
     }
 
     FindingDetail {
+        height: auto;
+        max-height: 50%;
+        padding: 1;
+        border-bottom: solid #333;
+    }
+
+    ChatPanel {
         height: 1fr;
         padding: 1;
-        overflow-y: auto;
     }
 
     FileHealthTree {
         height: 1fr;
     }
 
-    LogPanel {
-        height: 1fr;
-        padding: 0 1;
-    }
-
     SeverityBar {
-        margin-top: 1;
-    }
-
-    #severity-section {
-        column-span: 3;
-        height: auto;
-        border: round #333;
-        padding: 1;
         margin-top: 1;
     }
 
     HealthGauge {
         text-align: center;
+    }
+
+    #chat-input-container {
+        dock: bottom;
+        height: auto;
+        padding: 1;
+        background: #111;
+    }
+
+    #chat-input {
+        width: 100%;
+    }
+
+    ChatMessage {
+        width: 100%;
     }
     """
 
@@ -455,34 +520,43 @@ class SentinelApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
 
-        with Grid(id="main-grid"):
+        with Vertical(id="main-container"):
             # Top row - metrics
-            with Horizontal(id="header-row"):
+            with Horizontal(id="top-row"):
                 with Container(id="health-section"):
                     yield HealthGauge(label="Code Health", id="health-gauge")
 
                 with Container(id="metrics-section"):
-                    yield MetricCard("Files Scanned", icon="📁", color="cyan", id="metric-files")
-                    yield MetricCard("Total Findings", icon="⚠", color="yellow", id="metric-findings")
+                    yield MetricCard("Files", icon="📁", color="cyan", id="metric-files")
+                    yield MetricCard("Issues", icon="⚠", color="yellow", id="metric-findings")
                     yield MetricCard("Fixed", icon="✓", color="green", id="metric-fixed")
-                    yield MetricCard("Scans Today", icon="↻", color="blue", id="metric-scans")
+                    yield MetricCard("Scans", icon="↻", color="blue", id="metric-scans")
 
                 with Container(id="scan-section"):
                     yield ScanProgress(id="scan-progress")
 
-            # Main panels
-            with Container(id="left-panel"):
-                yield Static("FILES", classes="panel-title")
-                yield FileHealthTree(self.project_root, id="file-tree")
+            # Main panels row
+            with Horizontal(id="panels-row"):
+                with Container(id="left-panel"):
+                    yield Static("FILES", classes="panel-title")
+                    yield FileHealthTree(self.project_root, id="file-tree")
 
-            with Container(id="center-panel"):
-                yield Static("FINDINGS", classes="panel-title")
-                yield FindingsTable(id="findings-table")
-                yield SeverityBar(id="severity-bar")
+                with Container(id="center-panel"):
+                    yield Static("FINDINGS", classes="panel-title")
+                    yield FindingsTable(id="findings-table")
+                    yield SeverityBar(id="severity-bar")
 
-            with Container(id="right-panel"):
-                yield Static("DETAIL", classes="panel-title")
-                yield FindingDetail(id="finding-detail")
+                with Container(id="right-panel"):
+                    yield Static("SENTINEL AI", classes="panel-title")
+                    yield FindingDetail(id="finding-detail")
+                    yield ChatPanel(id="chat-panel")
+
+            # Chat input at bottom
+            with Container(id="chat-input-container"):
+                yield Input(
+                    placeholder="Ask Sentinel anything... (or :scan, :help, :clear)",
+                    id="chat-input"
+                )
 
         yield Footer()
 
@@ -511,11 +585,21 @@ class SentinelApp(App):
             # Run startup checks
             self.run_startup_checks()
 
+            # Welcome message in chat
+            chat = self.query_one("#chat-panel", ChatPanel)
+            chat.add_message(
+                "Hey! I'm Sentinel. Ask me anything about your code, "
+                "or type [cyan]:scan[/] to find issues. [dim]:help for commands[/]"
+            )
+
         except Exception as e:
             self.log_message(f"Init error: {e}", "error")
 
         # Animate scan progress
         self.set_interval(0.1, self.animate_scan)
+
+        # Focus chat input
+        self.query_one("#chat-input").focus()
 
     def run_startup_checks(self) -> None:
         """Run startup checks and display warnings."""
@@ -530,18 +614,18 @@ class SentinelApp(App):
         if not shutil.which("gh"):
             warnings.append(("⚠ GitHub CLI not found", "Install 'gh' CLI to auto-create issues from findings", "warn"))
         else:
-            # Check if gh is authenticated
+            # Check if gh is authenticated (quick check, no timeout issues)
             try:
                 result = subprocess.run(
                     ["gh", "auth", "status"],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=2
                 )
                 if result.returncode != 0:
                     warnings.append(("⚠ GitHub CLI not authenticated", "Run 'gh auth login' to enable auto-issue creation", "warn"))
-            except (subprocess.TimeoutExpired, Exception):
-                warnings.append(("⚠ GitHub CLI check failed", "Ensure 'gh' is properly configured", "warn"))
+            except Exception:
+                pass  # Skip if check fails - not critical
 
         # Check if claude CLI is available (for AI features)
         if not shutil.which("claude"):
@@ -682,12 +766,137 @@ class SentinelApp(App):
 
     def action_help(self) -> None:
         """Show help."""
-        self.log_message("s=Scan  r=Refresh  f=Focus findings  q=Quit", "info")
+        chat = self.query_one("#chat-panel", ChatPanel)
+        help_text = """[bold]Commands:[/]
+:scan - Run full scan
+:quick - Quick incremental scan
+:clear - Clear chat
+:help - Show this help
+
+[bold]Keys:[/]
+s - Scan  r - Refresh  f - Focus findings  q - Quit
+
+[dim]Or just ask me anything about your code![/]"""
+        chat.add_message(help_text)
 
     def log_message(self, message: str, level: str = "info") -> None:
         """Add message to log."""
-        # For now, just update subtitle
         self.sub_title = message
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle chat input."""
+        user_input = event.value.strip()
+        if not user_input:
+            return
+
+        event.input.value = ""
+        chat = self.query_one("#chat-panel", ChatPanel)
+
+        # Handle commands
+        if user_input.startswith(":"):
+            await self.handle_chat_command(user_input)
+            return
+
+        # Regular message - send to Claude
+        chat.add_message(user_input, is_user=True)
+        await self.ask_claude(user_input)
+
+    async def handle_chat_command(self, command: str) -> None:
+        """Handle chat commands."""
+        chat = self.query_one("#chat-panel", ChatPanel)
+        cmd = command.lower()
+
+        if cmd == ":clear":
+            chat.clear_chat()
+            chat.add_message("Chat cleared. How can I help?")
+        elif cmd == ":help":
+            self.action_help()
+        elif cmd == ":scan":
+            chat.add_message("Starting full scan...", is_user=False)
+            await self.action_scan()
+        elif cmd == ":quick":
+            chat.add_message("Starting quick scan...", is_user=False)
+            await self.run_quick_scan()
+        else:
+            chat.add_message(f"Unknown command: {cmd}. Try :help")
+
+    async def run_quick_scan(self) -> None:
+        """Run incremental scan."""
+        if not self.scanner:
+            return
+
+        progress = self.query_one("#scan-progress", ScanProgress)
+        progress.is_scanning = True
+        progress.status = "Quick scan..."
+
+        try:
+            findings = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.scanner.scan_directory(incremental=True)
+            )
+            self.refresh_data()
+
+            chat = self.query_one("#chat-panel", ChatPanel)
+            if findings:
+                chat.add_message(f"Found {len(findings)} new issues.")
+            else:
+                chat.add_message("No new issues found!")
+
+        except Exception as e:
+            self.log_message(f"Scan error: {e}", "error")
+        finally:
+            progress.is_scanning = False
+
+    async def ask_claude(self, question: str) -> None:
+        """Ask Claude Code about the codebase."""
+        chat = self.query_one("#chat-panel", ChatPanel)
+        chat.add_thinking()
+
+        try:
+            # Build context-aware prompt
+            stats = self.memory.get_stats() if self.memory else {}
+
+            prompt = f"""You are Code Sentinel, an AI code auditor assistant.
+Project: {self.project_root}
+Open issues: {stats.get('total_open', 0)} (P0:{stats.get('open_p0', 0)}, P1:{stats.get('open_p1', 0)}, P2:{stats.get('open_p2', 0)}, P3:{stats.get('open_p3', 0)})
+
+User question: {question}
+
+Be helpful and concise. If they ask to fix something, provide specific code changes. If they ask about the codebase, analyze relevant files."""
+
+            # Call Claude Code CLI
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["claude", "-p", prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    cwd=str(self.project_root)
+                )
+            )
+
+            chat.remove_thinking()
+
+            if result.returncode == 0 and result.stdout.strip():
+                # Truncate very long responses for TUI
+                response = result.stdout.strip()
+                if len(response) > 2000:
+                    response = response[:2000] + "\n\n[dim]... (truncated)[/]"
+                chat.add_message(response)
+            else:
+                error = result.stderr.strip() if result.stderr else "No response"
+                chat.add_message(f"[yellow]Claude returned no output. Error: {error[:200]}[/]")
+
+        except subprocess.TimeoutExpired:
+            chat.remove_thinking()
+            chat.add_message("[yellow]Request timed out. Try a simpler question.[/]")
+        except FileNotFoundError:
+            chat.remove_thinking()
+            chat.add_message("[red]Claude CLI not found.[/] Install with: npm install -g @anthropic-ai/claude-code")
+        except Exception as e:
+            chat.remove_thinking()
+            chat.add_message(f"[red]Error: {str(e)[:100]}[/]")
 
 
 def run_tui(project_root: Path = None) -> None:
