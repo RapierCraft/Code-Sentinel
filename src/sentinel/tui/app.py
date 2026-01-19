@@ -1,159 +1,446 @@
-"""Main TUI application for Code Sentinel."""
+"""
+Code Sentinel TUI - Dashboard-style interface.
+
+A professional code analysis dashboard with:
+- Real-time metrics and health scores
+- File browser with issue indicators
+- Findings panel with filtering
+- Live scan visualization
+- Keyboard-driven navigation
+"""
 
 import asyncio
 import subprocess
+import shutil
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
+import random
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Static, Input, Button
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll, Grid
+from textual.widgets import (
+    Header, Footer, Static, Button, DataTable, ProgressBar,
+    Tree, TabbedContent, TabPane, Label, Sparkline, Rule
+)
 from textual.binding import Binding
+from textual.reactive import reactive
+from textual.timer import Timer
+from textual import events
 from rich.text import Text
-from rich.panel import Panel
-from rich.markdown import Markdown
+from rich.style import Style
+from rich.table import Table
 
 from ..core.config import Config
-from ..core.memory import Memory
+from ..core.memory import Memory, Severity, Status
 from ..core.scanner import Scanner
 
 
-MASCOT = """
-    [cyan]▄▄▄▄▄▄▄[/]
-   [cyan]█[/][white]░░░░░[/][cyan]█[/]
-   [cyan]█[/][bright_white]●[/] [white]░[/] [bright_white]●[/][cyan]█[/]
-   [cyan]█[/][white]░[/][yellow]▄▄▄[/][white]░[/][cyan]█[/]
-   [cyan]█[/][white]░░░░░[/][cyan]█[/]
-   [cyan]▀▀▀▀▀▀▀[/]
-  [dim]Sentinel[/]
-"""
+# Severity colors
+SEV_COLORS = {
+    "P0": "#ff4444",
+    "P1": "#ffaa00",
+    "P2": "#4488ff",
+    "P3": "#44aa44",
+}
 
-WELCOME_MSG = """
-[bold cyan]Code Sentinel[/] - AI-powered code auditor
-
-[dim]Commands:[/]
-  [cyan]/scan[/]      - Scan codebase for issues
-  [cyan]/status[/]    - Show findings summary
-  [cyan]/findings[/]  - List all findings
-  [cyan]/watch[/]     - Watch for changes
-  [cyan]/graph[/]     - Analyze dependencies
-  [cyan]/help[/]      - Show all commands
-  [cyan]/quit[/]      - Exit
-
-[dim]Or just ask me anything about your code![/]
-"""
+SEV_ICONS = {
+    "P0": "●",
+    "P1": "●",
+    "P2": "●",
+    "P3": "●",
+}
 
 
-class MessageBubble(Static):
-    """A chat message bubble."""
+class HealthGauge(Static):
+    """Visual health score gauge."""
 
-    def __init__(self, content: str, is_user: bool = False, **kwargs):
+    score = reactive(100)
+
+    def __init__(self, label: str = "Health", **kwargs):
         super().__init__(**kwargs)
-        self.content = content
-        self.is_user = is_user
+        self.label = label
 
-    def compose(self) -> ComposeResult:
-        yield Static(self.content)
-
-    def on_mount(self) -> None:
-        if self.is_user:
-            self.styles.background = "#1a3a5c"
-            self.styles.border = ("round", "#3a7ca5")
+    def render(self) -> Text:
+        # Determine color based on score
+        if self.score >= 90:
+            color = "#44ff44"
+            status = "EXCELLENT"
+        elif self.score >= 70:
+            color = "#88ff44"
+            status = "GOOD"
+        elif self.score >= 50:
+            color = "#ffff44"
+            status = "FAIR"
+        elif self.score >= 30:
+            color = "#ffaa44"
+            status = "POOR"
         else:
-            self.styles.background = "#2d2d2d"
-            self.styles.border = ("round", "#4a4a4a")
-        self.styles.padding = (0, 1)
-        self.styles.margin = (0, 0, 1, 0)
+            color = "#ff4444"
+            status = "CRITICAL"
+
+        # Build gauge
+        filled = int(self.score / 5)
+        empty = 20 - filled
+
+        gauge = f"[{color}]{'█' * filled}[/][#333]{'░' * empty}[/]"
+
+        return Text.from_markup(
+            f"[bold]{self.label}[/]\n"
+            f"{gauge} [{color}]{self.score}%[/]\n"
+            f"[dim]{status}[/]"
+        )
 
 
-class ThinkingIndicator(Static):
-    """Animated thinking indicator."""
+class SeverityBar(Static):
+    """Horizontal bar showing severity distribution."""
+
+    def __init__(self, p0: int = 0, p1: int = 0, p2: int = 0, p3: int = 0, **kwargs):
+        super().__init__(**kwargs)
+        self.p0 = p0
+        self.p1 = p1
+        self.p2 = p2
+        self.p3 = p3
+
+    def update_counts(self, p0: int, p1: int, p2: int, p3: int) -> None:
+        self.p0, self.p1, self.p2, self.p3 = p0, p1, p2, p3
+        self.refresh()
+
+    def render(self) -> Text:
+        total = self.p0 + self.p1 + self.p2 + self.p3
+        if total == 0:
+            return Text.from_markup("[dim]No issues found[/]")
+
+        width = 40
+        p0_w = max(1, int(self.p0 / total * width)) if self.p0 else 0
+        p1_w = max(1, int(self.p1 / total * width)) if self.p1 else 0
+        p2_w = max(1, int(self.p2 / total * width)) if self.p2 else 0
+        p3_w = width - p0_w - p1_w - p2_w
+
+        bar = (
+            f"[{SEV_COLORS['P0']}]{'█' * p0_w}[/]"
+            f"[{SEV_COLORS['P1']}]{'█' * p1_w}[/]"
+            f"[{SEV_COLORS['P2']}]{'█' * p2_w}[/]"
+            f"[{SEV_COLORS['P3']}]{'█' * p3_w}[/]"
+        )
+
+        legend = (
+            f"[{SEV_COLORS['P0']}]● P0:{self.p0}[/]  "
+            f"[{SEV_COLORS['P1']}]● P1:{self.p1}[/]  "
+            f"[{SEV_COLORS['P2']}]● P2:{self.p2}[/]  "
+            f"[{SEV_COLORS['P3']}]● P3:{self.p3}[/]"
+        )
+
+        return Text.from_markup(f"{bar}\n{legend}")
+
+
+class MetricCard(Static):
+    """Single metric display card."""
+
+    value = reactive("0")
+
+    def __init__(self, label: str, icon: str = "◆", color: str = "cyan", **kwargs):
+        super().__init__(**kwargs)
+        self.label = label
+        self.icon = icon
+        self.color = color
+
+    def render(self) -> Text:
+        return Text.from_markup(
+            f"[{self.color}]{self.icon}[/] [{self.color} bold]{self.value}[/]\n"
+            f"[dim]{self.label}[/]"
+        )
+
+
+class ScanProgress(Static):
+    """Animated scan progress indicator."""
+
+    progress = reactive(0)
+    status = reactive("Idle")
+    is_scanning = reactive(False)
 
     def __init__(self, **kwargs):
-        super().__init__("", **kwargs)
-        self.dots = 0
-        self.messages = [
-            "Analyzing",
-            "Scanning patterns",
-            "Checking security",
-            "Processing",
-        ]
-        self.msg_idx = 0
+        super().__init__(**kwargs)
+        self.animation_frame = 0
+        self.scan_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    def on_mount(self) -> None:
-        self.styles.color = "cyan"
-        self.set_interval(0.3, self.animate)
+    def render(self) -> Text:
+        if self.is_scanning:
+            self.animation_frame = (self.animation_frame + 1) % len(self.scan_frames)
+            spinner = self.scan_frames[self.animation_frame]
+            bar_filled = int(self.progress / 2.5)
+            bar_empty = 40 - bar_filled
+            bar = f"[cyan]{'━' * bar_filled}[/][#333]{'─' * bar_empty}[/]"
+            return Text.from_markup(
+                f"[cyan]{spinner}[/] [bold]SCANNING[/] {self.progress}%\n"
+                f"{bar}\n"
+                f"[dim]{self.status}[/]"
+            )
+        else:
+            return Text.from_markup(
+                f"[green]✓[/] [bold]READY[/]\n"
+                f"[#333]{'─' * 40}[/]\n"
+                f"[dim]Press [bold]s[/] to scan[/]"
+            )
 
-    def animate(self) -> None:
-        self.dots = (self.dots + 1) % 4
-        if self.dots == 0:
-            self.msg_idx = (self.msg_idx + 1) % len(self.messages)
-        self.update(f"[cyan]{self.messages[self.msg_idx]}{'.' * self.dots}[/]")
 
+class FileHealthTree(Tree):
+    """File tree with health indicators."""
 
-class ChatArea(VerticalScroll):
-    """Scrollable chat area."""
+    def __init__(self, project_root: Path, **kwargs):
+        super().__init__(str(project_root.name), **kwargs)
+        self.project_root = project_root
+        self.file_issues = {}  # path -> issue count
 
-    def add_message(self, content: str, is_user: bool = False) -> None:
-        bubble = MessageBubble(content, is_user=is_user)
-        self.mount(bubble)
-        self.scroll_end(animate=False)
+    def set_file_issues(self, issues: dict) -> None:
+        self.file_issues = issues
+        self.refresh()
 
-    def add_thinking(self) -> ThinkingIndicator:
-        indicator = ThinkingIndicator(id="thinking")
-        self.mount(indicator)
-        self.scroll_end(animate=False)
-        return indicator
+    def build_tree(self, include_dirs: list[str]) -> None:
+        self.clear()
+        self.root.expand()
 
-    def remove_thinking(self) -> None:
+        for dir_name in include_dirs:
+            dir_path = self.project_root / dir_name
+            if dir_path.exists():
+                self._add_directory(self.root, dir_path, dir_name)
+
+    def _add_directory(self, parent, path: Path, name: str, depth: int = 0) -> None:
+        if depth > 3:  # Limit depth
+            return
+
+        # Get issue count for this directory
+        dir_issues = sum(
+            count for p, count in self.file_issues.items()
+            if p.startswith(str(path.relative_to(self.project_root)))
+        )
+
+        if dir_issues > 0:
+            icon = f"[{SEV_COLORS['P1']}]📁[/]"
+            label = f"{icon} {name} [dim]({dir_issues})[/]"
+        else:
+            label = f"[green]📁[/] {name}"
+
+        node = parent.add(label, expand=depth < 1)
+
         try:
-            thinking = self.query_one("#thinking")
-            thinking.remove()
-        except Exception:
+            for item in sorted(path.iterdir()):
+                if item.name.startswith("."):
+                    continue
+                if item.name in ("node_modules", "__pycache__", "venv", ".venv"):
+                    continue
+
+                if item.is_dir():
+                    self._add_directory(node, item, item.name, depth + 1)
+                elif item.suffix in (".py", ".js", ".ts", ".tsx"):
+                    rel_path = str(item.relative_to(self.project_root))
+                    issues = self.file_issues.get(rel_path, 0)
+
+                    if issues > 0:
+                        color = SEV_COLORS["P1"] if issues > 3 else SEV_COLORS["P3"]
+                        node.add_leaf(f"[{color}]●[/] {item.name} [dim]({issues})[/]")
+                    else:
+                        node.add_leaf(f"[green]●[/] {item.name}")
+        except PermissionError:
             pass
 
 
+class FindingsTable(DataTable):
+    """Interactive findings table."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+
+    def setup(self) -> None:
+        self.add_column("", key="sev", width=3)
+        self.add_column("Title", key="title", width=35)
+        self.add_column("File", key="file", width=30)
+        self.add_column("Line", key="line", width=6)
+
+    def load_findings(self, findings: list) -> None:
+        self.clear()
+        for f in findings:
+            sev_color = SEV_COLORS.get(f.severity.value, "white")
+            self.add_row(
+                Text(SEV_ICONS.get(f.severity.value, "●"), style=sev_color),
+                Text(f.title[:33] + "…" if len(f.title) > 35 else f.title),
+                Text(f.file_path.split("/")[-1][:28], style="dim"),
+                Text(str(f.line_start), style="cyan"),
+                key=str(f.id)
+            )
+
+
+class FindingDetail(Static):
+    """Detailed view of a single finding."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.finding = None
+
+    def show_finding(self, finding) -> None:
+        self.finding = finding
+        self.refresh()
+
+    def render(self) -> Text:
+        if not self.finding:
+            return Text.from_markup("[dim]Select a finding to view details[/]")
+
+        f = self.finding
+        sev_color = SEV_COLORS.get(f.severity.value, "white")
+
+        content = f"""[bold {sev_color}]{f.severity.value}[/] [bold]{f.title}[/]
+
+[dim]Category:[/] {f.category.value}
+[dim]File:[/] {f.file_path}
+[dim]Line:[/] {f.line_start}
+[dim]Detected by:[/] {f.detected_by}
+
+[bold]Description[/]
+{f.description}
+
+[bold]Suggestion[/]
+{f.suggestion or 'No suggestion available'}"""
+
+        if f.code_snippet:
+            content += f"\n\n[bold]Code[/]\n[on #1a1a1a]{f.code_snippet}[/]"
+
+        return Text.from_markup(content)
+
+
+class LogPanel(VerticalScroll):
+    """Activity log panel."""
+
+    def add_log(self, message: str, level: str = "info") -> None:
+        colors = {"info": "cyan", "warn": "yellow", "error": "red", "success": "green"}
+        color = colors.get(level, "white")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        self.mount(Static(
+            Text.from_markup(f"[dim]{timestamp}[/] [{color}]●[/] {message}")
+        ))
+        self.scroll_end(animate=False)
+
+
 class SentinelApp(App):
-    """Code Sentinel TUI Application."""
+    """Code Sentinel Dashboard TUI."""
 
     CSS = """
     Screen {
-        background: #000;
+        background: #0a0a0a;
     }
 
-    #main-container {
+    #main-grid {
+        grid-size: 3 2;
+        grid-columns: 1fr 2fr 1fr;
+        grid-rows: auto 1fr;
         height: 100%;
         padding: 1;
+        grid-gutter: 1;
     }
 
-    #chat-area {
-        height: 1fr;
+    #header-row {
+        column-span: 3;
+        height: auto;
+        layout: horizontal;
+    }
+
+    #health-section {
+        width: 1fr;
+        height: auto;
         border: round #333;
         padding: 1;
     }
 
-    #input-container {
+    #metrics-section {
+        width: 2fr;
         height: auto;
+        border: round #333;
+        padding: 1;
+        layout: horizontal;
+    }
+
+    #scan-section {
+        width: 1fr;
+        height: auto;
+        border: round #333;
+        padding: 1;
+    }
+
+    MetricCard {
+        width: 1fr;
+        height: auto;
+        padding: 0 1;
+    }
+
+    #left-panel {
+        border: round #333;
+        height: 100%;
+    }
+
+    #center-panel {
+        border: round #333;
+        height: 100%;
+    }
+
+    #right-panel {
+        border: round #333;
+        height: 100%;
+    }
+
+    .panel-title {
+        dock: top;
+        background: #1a1a1a;
+        padding: 0 1;
+        text-style: bold;
+        color: #888;
+    }
+
+    FindingsTable {
+        height: 1fr;
+    }
+
+    FindingDetail {
+        height: 1fr;
+        padding: 1;
+        overflow-y: auto;
+    }
+
+    FileHealthTree {
+        height: 1fr;
+    }
+
+    LogPanel {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    SeverityBar {
         margin-top: 1;
     }
 
-    #chat-input {
-        width: 100%;
+    #severity-section {
+        column-span: 3;
+        height: auto;
+        border: round #333;
+        padding: 1;
+        margin-top: 1;
     }
 
-    MessageBubble {
-        width: 100%;
-        margin-bottom: 1;
-    }
-
-    #welcome {
-        margin-bottom: 1;
+    HealthGauge {
+        text-align: center;
     }
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit"),
-        Binding("ctrl+q", "quit", "Quit"),
+        Binding("q", "quit", "Quit"),
+        Binding("s", "scan", "Scan"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("f", "focus_findings", "Findings"),
+        Binding("d", "show_detail", "Detail"),
+        Binding("g", "run_graph", "Graph"),
+        Binding("?", "help", "Help"),
         Binding("escape", "quit", "Quit"),
     ]
 
@@ -163,316 +450,244 @@ class SentinelApp(App):
         self.config = None
         self.memory = None
         self.scanner = None
-        self.show_welcome = True
+        self.scan_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Container(id="main-container"):
-            with ChatArea(id="chat-area"):
-                if self.show_welcome:
-                    yield Static(MASCOT, id="mascot")
-                    yield Static(WELCOME_MSG, id="welcome")
-            with Container(id="input-container"):
-                yield Input(placeholder="Ask about your code or type /command...", id="chat-input")
+
+        with Grid(id="main-grid"):
+            # Top row - metrics
+            with Horizontal(id="header-row"):
+                with Container(id="health-section"):
+                    yield HealthGauge(label="Code Health", id="health-gauge")
+
+                with Container(id="metrics-section"):
+                    yield MetricCard("Files Scanned", icon="📁", color="cyan", id="metric-files")
+                    yield MetricCard("Total Findings", icon="⚠", color="yellow", id="metric-findings")
+                    yield MetricCard("Fixed", icon="✓", color="green", id="metric-fixed")
+                    yield MetricCard("Scans Today", icon="↻", color="blue", id="metric-scans")
+
+                with Container(id="scan-section"):
+                    yield ScanProgress(id="scan-progress")
+
+            # Main panels
+            with Container(id="left-panel"):
+                yield Static("FILES", classes="panel-title")
+                yield FileHealthTree(self.project_root, id="file-tree")
+
+            with Container(id="center-panel"):
+                yield Static("FINDINGS", classes="panel-title")
+                yield FindingsTable(id="findings-table")
+                yield SeverityBar(id="severity-bar")
+
+            with Container(id="right-panel"):
+                yield Static("DETAIL", classes="panel-title")
+                yield FindingDetail(id="finding-detail")
+
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = "Code Sentinel"
-        self.sub_title = str(self.project_root)
+        self.sub_title = str(self.project_root.name)
 
-        # Initialize components
+        # Initialize
         try:
             self.config = Config.load(self.project_root)
             self.config.ensure_dirs()
             self.memory = Memory(self.project_root / ".sentinel" / "memory.db")
             self.scanner = Scanner(self.config, self.memory)
+
+            # Setup components
+            table = self.query_one("#findings-table", FindingsTable)
+            table.setup()
+
+            # Build file tree
+            tree = self.query_one("#file-tree", FileHealthTree)
+            tree.build_tree(self.config.scan.include_dirs)
+
+            # Load initial data
+            self.refresh_data()
+
+            # Run startup checks
+            self.run_startup_checks()
+
         except Exception as e:
-            self.add_response(f"[red]Error initializing: {e}[/]\nRun [cyan]sentinel init[/] first.")
+            self.log_message(f"Init error: {e}", "error")
 
-        # Focus input
-        self.query_one("#chat-input").focus()
+        # Animate scan progress
+        self.set_interval(0.1, self.animate_scan)
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle user input."""
-        user_input = event.value.strip()
-        if not user_input:
-            return
+    def run_startup_checks(self) -> None:
+        """Run startup checks and display warnings."""
+        warnings = []
 
-        # Clear input
-        event.input.value = ""
+        # Check if git is initialized
+        git_dir = self.project_root / ".git"
+        if not git_dir.exists():
+            warnings.append(("⚠ Git not initialized", "Run 'git init' to enable git integration (blame, history)", "warn"))
 
-        # Remove welcome if shown
-        if self.show_welcome:
-            self.show_welcome = False
+        # Check if gh CLI is installed
+        if not shutil.which("gh"):
+            warnings.append(("⚠ GitHub CLI not found", "Install 'gh' CLI to auto-create issues from findings", "warn"))
+        else:
+            # Check if gh is authenticated
             try:
-                self.query_one("#mascot").remove()
-                self.query_one("#welcome").remove()
-            except Exception:
-                pass
-
-        # Add user message
-        chat_area = self.query_one("#chat-area", ChatArea)
-        chat_area.add_message(user_input, is_user=True)
-
-        # Process command or message
-        await self.process_input(user_input)
-
-    async def process_input(self, user_input: str) -> None:
-        """Process user input - commands or questions."""
-        chat_area = self.query_one("#chat-area", ChatArea)
-
-        # Handle commands
-        if user_input.startswith("/"):
-            await self.handle_command(user_input)
-            return
-
-        # For non-commands, use AI or show help
-        chat_area.add_thinking()
-
-        try:
-            response = await self.ask_ai(user_input)
-            chat_area.remove_thinking()
-            chat_area.add_message(response)
-        except Exception as e:
-            chat_area.remove_thinking()
-            chat_area.add_message(f"[red]Error: {e}[/]")
-
-    async def handle_command(self, command: str) -> None:
-        """Handle slash commands."""
-        chat_area = self.query_one("#chat-area", ChatArea)
-        cmd = command.lower().split()[0]
-        args = command.split()[1:] if len(command.split()) > 1 else []
-
-        if cmd in ("/quit", "/exit", "/q"):
-            self.exit()
-            return
-
-        if cmd == "/help":
-            help_text = """[bold]Available Commands:[/]
-
-[cyan]/scan[/]           - Full codebase scan
-[cyan]/scan --quick[/]   - Incremental scan (changed files)
-[cyan]/scan -f FILE[/]   - Scan specific file
-[cyan]/status[/]         - Show findings summary
-[cyan]/findings[/]       - List all findings
-[cyan]/fix ID[/]         - Get help fixing finding #ID
-[cyan]/watch[/]          - Watch mode (continuous scanning)
-[cyan]/graph[/]          - Analyze codebase dependencies
-[cyan]/impact FILE[/]    - Show what's affected by changing FILE
-[cyan]/clear[/]          - Clear chat
-[cyan]/quit[/]           - Exit"""
-            chat_area.add_message(help_text)
-            return
-
-        if cmd == "/clear":
-            for child in list(chat_area.children):
-                child.remove()
-            return
-
-        if cmd == "/status":
-            chat_area.add_thinking()
-            await asyncio.sleep(0.1)
-            chat_area.remove_thinking()
-
-            if self.memory:
-                stats = self.memory.get_stats()
-                status = f"""[bold cyan]Sentinel Status[/]
-
-[bold]Open Findings:[/]
-  [red]P0 (Critical):[/] {stats['open_p0']}
-  [yellow]P1 (High):[/]     {stats['open_p1']}
-  [blue]P2 (Medium):[/]   {stats['open_p2']}
-  [green]P3 (Low):[/]      {stats['open_p3']}
-
-[bold]Summary:[/]
-  Total Open:  {stats['total_open']}
-  Total Fixed: {stats['total_fixed']}
-  Total Scans: {stats['total_scans']}"""
-                chat_area.add_message(status)
-            else:
-                chat_area.add_message("[red]Not initialized. Run /scan first.[/]")
-            return
-
-        if cmd == "/scan":
-            chat_area.add_thinking()
-            await asyncio.sleep(0.1)
-
-            try:
-                if "-f" in args:
-                    idx = args.index("-f")
-                    if idx + 1 < len(args):
-                        file_path = self.project_root / args[idx + 1]
-                        result = self.scanner.scan_file(file_path)
-                        findings = result.findings if result else []
-                    else:
-                        chat_area.remove_thinking()
-                        chat_area.add_message("[red]Usage: /scan -f FILEPATH[/]")
-                        return
-                else:
-                    incremental = "--quick" in args or "-q" in args
-                    findings = self.scanner.scan_directory(incremental=incremental)
-
-                chat_area.remove_thinking()
-
-                if findings:
-                    result = f"[yellow]Found {len(findings)} issues:[/]\n\n"
-                    for f in findings[:10]:
-                        sev_color = {"P0": "red", "P1": "yellow", "P2": "blue", "P3": "green"}.get(f.severity.value, "white")
-                        result += f"[{sev_color}]{f.severity.value}[/] {f.title}\n"
-                        result += f"  [dim]{f.file_path}:{f.line_start}[/]\n"
-                    if len(findings) > 10:
-                        result += f"\n[dim]... and {len(findings) - 10} more[/]"
-                    chat_area.add_message(result)
-                else:
-                    chat_area.add_message("[green]No issues found![/]")
-
-            except Exception as e:
-                chat_area.remove_thinking()
-                chat_area.add_message(f"[red]Scan error: {e}[/]")
-            return
-
-        if cmd == "/findings":
-            if self.memory:
-                from ..core.memory import Status
-                findings = self.memory.get_findings(
-                    status=[Status.DETECTED, Status.REPORTED, Status.ACKNOWLEDGED],
-                    limit=20
-                )
-                if findings:
-                    result = "[bold]Recent Findings:[/]\n\n"
-                    for f in findings:
-                        sev_color = {"P0": "red", "P1": "yellow", "P2": "blue", "P3": "green"}.get(f.severity.value, "white")
-                        result += f"[{sev_color}]#{f.id} {f.severity.value}[/] {f.title}\n"
-                        result += f"  [dim]{f.file_path}:{f.line_start}[/]\n"
-                    chat_area.add_message(result)
-                else:
-                    chat_area.add_message("[dim]No findings yet. Run /scan first.[/]")
-            return
-
-        if cmd == "/fix":
-            if args and self.memory:
-                try:
-                    finding_id = int(args[0])
-                    finding = self.memory.get_finding(finding_id)
-                    if finding:
-                        result = f"""[bold]Finding #{finding_id}[/]
-
-[bold]{finding.title}[/]
-[dim]File:[/] {finding.file_path}:{finding.line_start}
-[dim]Severity:[/] {finding.severity.value}
-[dim]Category:[/] {finding.category.value}
-
-[bold]Description:[/]
-{finding.description}
-
-[bold]Suggestion:[/]
-{finding.suggestion or 'No suggestion available'}"""
-                        if finding.code_snippet:
-                            result += f"\n\n[bold]Code:[/]\n```\n{finding.code_snippet}\n```"
-                        chat_area.add_message(result)
-                    else:
-                        chat_area.add_message(f"[red]Finding #{finding_id} not found[/]")
-                except ValueError:
-                    chat_area.add_message("[red]Usage: /fix <id>[/]")
-            else:
-                chat_area.add_message("[red]Usage: /fix <id>[/]")
-            return
-
-        if cmd == "/graph":
-            chat_area.add_thinking()
-            await asyncio.sleep(0.1)
-
-            try:
-                from ..core.graph import CodeGraph
-                graph = CodeGraph(self.project_root)
-                graph.build()
-                metrics = graph.get_coupling_metrics()
-
-                chat_area.remove_thinking()
-                result = f"""[bold cyan]Codebase Analysis[/]
-
-[bold]Metrics:[/]
-  Files:        {metrics['total_files']}
-  Symbols:      {metrics['total_symbols']}
-  Imports:      {metrics['total_imports']}
-  Avg Deps:     {metrics['avg_dependencies']:.1f}
-  Max Deps:     {metrics['max_dependencies']}
-  Orphan Files: {metrics['orphan_files']}"""
-                chat_area.add_message(result)
-            except Exception as e:
-                chat_area.remove_thinking()
-                chat_area.add_message(f"[red]Graph error: {e}[/]")
-            return
-
-        if cmd == "/impact":
-            if args:
-                chat_area.add_thinking()
-                await asyncio.sleep(0.1)
-
-                try:
-                    from ..core.graph import CodeGraph
-                    graph = CodeGraph(self.project_root)
-                    graph.build()
-                    affected = graph.get_impact_radius(args[0])
-
-                    chat_area.remove_thinking()
-                    if affected:
-                        result = f"[bold]Changing {args[0]} may affect:[/]\n\n"
-                        for f in sorted(affected)[:15]:
-                            result += f"  - {f}\n"
-                        if len(affected) > 15:
-                            result += f"\n[dim]... and {len(affected) - 15} more[/]"
-                        chat_area.add_message(result)
-                    else:
-                        chat_area.add_message(f"[green]No files depend on {args[0]}[/]")
-                except Exception as e:
-                    chat_area.remove_thinking()
-                    chat_area.add_message(f"[red]Impact error: {e}[/]")
-            else:
-                chat_area.add_message("[red]Usage: /impact <filepath>[/]")
-            return
-
-        # Unknown command
-        chat_area.add_message(f"[red]Unknown command: {cmd}[/]\nType [cyan]/help[/] for available commands.")
-
-    async def ask_ai(self, question: str) -> str:
-        """Ask AI about the codebase."""
-        # Try Claude Code CLI
-        try:
-            prompt = f"""You are Code Sentinel, an AI code auditor.
-Answer this question about the codebase at {self.project_root}:
-
-{question}
-
-Be concise and helpful. If you need to see specific files, mention which ones."""
-
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["claude", "--dangerously-skip-permissions", "-p", prompt],
+                result = subprocess.run(
+                    ["gh", "auth", "status"],
                     capture_output=True,
                     text=True,
-                    timeout=60,
-                    cwd=str(self.project_root)
+                    timeout=5
                 )
+                if result.returncode != 0:
+                    warnings.append(("⚠ GitHub CLI not authenticated", "Run 'gh auth login' to enable auto-issue creation", "warn"))
+            except (subprocess.TimeoutExpired, Exception):
+                warnings.append(("⚠ GitHub CLI check failed", "Ensure 'gh' is properly configured", "warn"))
+
+        # Check if claude CLI is available (for AI features)
+        if not shutil.which("claude"):
+            warnings.append(("ℹ Claude CLI not found", "Install Claude Code CLI for AI-powered analysis", "info"))
+
+        # Check if .sentinel is initialized
+        sentinel_dir = self.project_root / ".sentinel"
+        if not sentinel_dir.exists():
+            warnings.append(("⚠ Sentinel not initialized", "Press 's' to run first scan and initialize", "warn"))
+
+        # Display warnings
+        if warnings:
+            for title, desc, level in warnings:
+                self.notify(f"{title}: {desc}", severity="warning" if level == "warn" else "information", timeout=5)
+                self.log_message(f"{title} - {desc}", level)
+        else:
+            self.log_message("All systems ready", "success")
+
+    def refresh_data(self) -> None:
+        """Refresh all data displays."""
+        if not self.memory:
+            return
+
+        stats = self.memory.get_stats()
+
+        # Update metrics
+        self.query_one("#metric-files", MetricCard).value = str(stats.get("files_scanned", 0))
+        self.query_one("#metric-findings", MetricCard).value = str(stats["total_open"])
+        self.query_one("#metric-fixed", MetricCard).value = str(stats["total_fixed"])
+        self.query_one("#metric-scans", MetricCard).value = str(stats["total_scans"])
+
+        # Update health gauge
+        health = self.query_one("#health-gauge", HealthGauge)
+        total_issues = stats["total_open"]
+        p0_weight = stats["open_p0"] * 25
+        p1_weight = stats["open_p1"] * 10
+        p2_weight = stats["open_p2"] * 3
+        p3_weight = stats["open_p3"] * 1
+        penalty = min(100, p0_weight + p1_weight + p2_weight + p3_weight)
+        health.score = max(0, 100 - penalty)
+
+        # Update severity bar
+        severity_bar = self.query_one("#severity-bar", SeverityBar)
+        severity_bar.update_counts(
+            stats["open_p0"], stats["open_p1"],
+            stats["open_p2"], stats["open_p3"]
+        )
+
+        # Load findings into table
+        findings = self.memory.get_findings(
+            status=[Status.DETECTED, Status.REPORTED, Status.ACKNOWLEDGED],
+            limit=50
+        )
+        table = self.query_one("#findings-table", FindingsTable)
+        table.load_findings(findings)
+
+        # Update file tree with issue counts
+        file_issues = {}
+        for f in findings:
+            file_issues[f.file_path] = file_issues.get(f.file_path, 0) + 1
+
+        tree = self.query_one("#file-tree", FileHealthTree)
+        tree.set_file_issues(file_issues)
+
+    def animate_scan(self) -> None:
+        """Animate the scan progress indicator."""
+        progress = self.query_one("#scan-progress", ScanProgress)
+        if progress.is_scanning:
+            progress.refresh()
+
+    async def action_scan(self) -> None:
+        """Run a full scan."""
+        if not self.scanner:
+            self.log_message("Scanner not initialized", "error")
+            return
+
+        progress = self.query_one("#scan-progress", ScanProgress)
+        progress.is_scanning = True
+        progress.progress = 0
+        progress.status = "Starting scan..."
+
+        self.log_message("Starting full scan...", "info")
+
+        # Run scan in background
+        try:
+            # Simulate progress updates
+            for i in range(0, 101, 10):
+                progress.progress = i
+                progress.status = f"Scanning... ({i}%)"
+                await asyncio.sleep(0.1)
+
+            # Actually run scan
+            findings = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.scanner.scan_directory(incremental=False)
             )
 
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            else:
-                return "[dim]AI not available. Use /commands or set up Claude Code CLI.[/]"
+            progress.progress = 100
+            progress.status = "Complete!"
+            await asyncio.sleep(0.5)
 
-        except FileNotFoundError:
-            return "[dim]Claude Code CLI not found. Install it for AI features.\nUse /commands for available actions.[/]"
-        except subprocess.TimeoutExpired:
-            return "[yellow]AI request timed out. Try a simpler question.[/]"
+            self.log_message(f"Scan complete: {len(findings)} findings", "success")
+            self.refresh_data()
+
         except Exception as e:
-            return f"[red]AI error: {e}[/]"
+            self.log_message(f"Scan error: {e}", "error")
 
-    def add_response(self, content: str) -> None:
-        """Add a response message."""
-        chat_area = self.query_one("#chat-area", ChatArea)
-        chat_area.add_message(content)
+        finally:
+            progress.is_scanning = False
+
+    def action_refresh(self) -> None:
+        """Refresh data."""
+        self.refresh_data()
+        self.log_message("Data refreshed", "info")
+
+    def action_focus_findings(self) -> None:
+        """Focus the findings table."""
+        self.query_one("#findings-table").focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle finding selection."""
+        if not self.memory or not event.row_key:
+            return
+
+        try:
+            finding_id = int(str(event.row_key.value))
+            finding = self.memory.get_finding(finding_id)
+            if finding:
+                detail = self.query_one("#finding-detail", FindingDetail)
+                detail.show_finding(finding)
+        except (ValueError, AttributeError):
+            pass
+
+    def action_run_graph(self) -> None:
+        """Run graph analysis."""
+        self.log_message("Building dependency graph...", "info")
+        # TODO: Implement graph view
+
+    def action_help(self) -> None:
+        """Show help."""
+        self.log_message("s=Scan  r=Refresh  f=Focus findings  q=Quit", "info")
+
+    def log_message(self, message: str, level: str = "info") -> None:
+        """Add message to log."""
+        # For now, just update subtitle
+        self.sub_title = message
 
 
 def run_tui(project_root: Path = None) -> None:
