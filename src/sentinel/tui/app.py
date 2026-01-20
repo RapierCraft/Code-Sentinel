@@ -432,51 +432,45 @@ class ChatLog(RichLog):
         self.clear()
 
 
-class ThinkingIndicator(Static):
+class ThinkingIndicator(Label):
     """Animated thinking indicator with queue status."""
 
-    SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.frame_index = 0
-        self.is_thinking = False
-        self.queue_count = 0
+        super().__init__("Ready", **kwargs)
+        self.frame = 0
+        self._thinking = False
+        self._queue = 0
 
     def on_mount(self) -> None:
-        """Start animation timer on mount."""
         self.set_interval(0.1, self._tick)
 
     def _tick(self) -> None:
-        """Animation tick - always runs."""
-        if self.is_thinking:
-            self.frame_index = (self.frame_index + 1) % len(self.SPINNER_FRAMES)
-        self.update(self._render_content())
+        if self._thinking:
+            self.frame = (self.frame + 1) % len(self.SPINNER)
+            self._update_text()
 
-    def set_thinking(self, thinking: bool) -> None:
-        """Set thinking state."""
-        self.is_thinking = thinking
-        self.update(self._render_content())
+    def set_thinking(self, val: bool) -> None:
+        self._thinking = val
+        self._update_text()
 
-    def set_queue(self, count: int) -> None:
-        """Set queue count."""
-        self.queue_count = count
-        self.update(self._render_content())
+    def set_queue(self, val: int) -> None:
+        self._queue = val
+        self._update_text()
 
-    def _render_content(self) -> Text:
-        if not self.is_thinking and self.queue_count == 0:
-            return Text.from_markup("[dim]Ready[/dim]")
-
-        parts = []
-
-        if self.is_thinking:
-            spinner = self.SPINNER_FRAMES[self.frame_index]
-            parts.append(f"[cyan bold]{spinner} Processing...[/cyan bold]")
-
-        if self.queue_count > 0:
-            parts.append(f"[yellow]({self.queue_count} queued)[/yellow]")
-
-        return Text.from_markup(" ".join(parts))
+    def _update_text(self) -> None:
+        if not self._thinking and self._queue == 0:
+            self.update("Ready")
+            self.styles.color = "grey"
+        else:
+            parts = []
+            if self._thinking:
+                parts.append(f"{self.SPINNER[self.frame]} Processing...")
+            if self._queue > 0:
+                parts.append(f"({self._queue} queued)")
+            self.update(" ".join(parts))
+            self.styles.color = "cyan"
 
 
 class LogPanel(VerticalScroll):
